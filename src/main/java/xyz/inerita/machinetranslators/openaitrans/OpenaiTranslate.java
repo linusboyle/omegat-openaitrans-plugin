@@ -19,6 +19,9 @@ import cn.hutool.json.JSONArray;
 import org.omegat.core.Core;
 import org.omegat.core.machinetranslators.BaseCachedTranslate;
 import org.omegat.gui.exttrans.MTConfigDialog;
+import org.omegat.gui.glossary.GlossaryEntry;
+import org.omegat.core.data.SourceTextEntry;
+import org.omegat.gui.glossary.GlossarySearcher;
 import org.omegat.util.Language;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +30,7 @@ import java.awt.*;
 import java.util.Map;
 import java.util.List;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collections;
 import javax.swing.*;
 import java.math.BigDecimal;
@@ -45,14 +49,14 @@ public class OpenaiTranslate extends BaseCachedTranslate {
     private static final String PROPERTY_API_TEMPERATURE = "openai.api.temperature";
     private static final String PROPERTY_API_CACHE = "openai.api.enable.cache";
 
-    private static final String[] openaiModels = {"gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-4-turbo", "gpt-3.5-turbo", "gpt-3.5"};
+    private static final String[] openaiModels = {"gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-4-turbo", "gpt-3.5-turbo", "gpt-3.5", "Qwen/Qwen2.5-7B-Instruct"};
     private static final String[] claudeModels = {"claude-3-opus", "claude-3-5-sonnet", "claude-3-sonnet", "claude-3-haiku", "claude-3-5-sonnet-20240620"};
     private static final String[] Providers = {"default", "OpenAI", "Claude"};
 
 
     private static final Logger LOGGER = LoggerFactory.getLogger(OpenaiTranslate.class);
 
-    
+
     /**
      * 在软件启动时会自动调用该函数来注册插件.
      */
@@ -133,10 +137,11 @@ public class OpenaiTranslate extends BaseCachedTranslate {
         else if (claudeModelsList.contains(model)) {
             provider = (provider == "default") ? "Claude" : provider;
             // url += "/v1/messages";
-        } 
+        }
         // 如果 model 不在任何一个列表中
         else {
-            return "An unsupported model was used!";
+            // use OpenAI
+            provider = (provider == "default") ? "OpenAI" : provider;
         }
 
         if (provider == "OpenAI") {
@@ -150,11 +155,45 @@ public class OpenaiTranslate extends BaseCachedTranslate {
         String lvSourceLang = sLang.getLanguage();
         String lvTargetLang = tLang.getLanguage();
 
-        String defaultPrompt = String.format("Please translate the following text from %s to %s.", lvSourceLang, lvTargetLang);
+        String defaultPrompt = String.format("You are a translation tool integrated in a CAT (Computer-Assisted Translation) tool. Translate the following text from %s to %s. Preserve the tags in the text and keep any segmentations intact.\n\n", lvSourceLang, lvTargetLang);
         if (prompt.isEmpty()) {
             prompt = defaultPrompt;
         }
 
+        // 프로젝트에서 SourceTextEntry를 찾음
+        List<SourceTextEntry> entries = Core.getProject().getAllEntries();
+        SourceTextEntry matchingEntry = null;
+
+        for (SourceTextEntry entry : entries) {
+            if (entry.getSrcText().equals(text)) {
+                matchingEntry = entry;
+                break;
+            }
+        }
+
+        List<GlossaryEntry> glossaryEntries = new ArrayList<>();
+        if (matchingEntry != null) {
+            // GlossarySearcher를 사용하여 용어집 검색 수행
+            GlossarySearcher glossarySearcher = new GlossarySearcher(Core.getProject().getSourceTokenizer(), sLang, true);
+            glossaryEntries = glossarySearcher.searchSourceMatches(matchingEntry, Core.getGlossaryManager().getGlossaryEntries(text));
+        }
+
+        StringBuilder promptBuilder = new StringBuilder();
+
+        // 기본 지침 추가
+        promptBuilder.append(prompt);
+
+        // Glossary가 있을 경우 추가
+        if (!glossaryEntries.isEmpty()) {
+            promptBuilder.append("Glossary:\n");
+            for (GlossaryEntry entry : glossaryEntries) {
+                String[] locTerms = entry.getLocTerms(false);
+                String locTerm = locTerms.length > 0 ? locTerms[0] : "";
+                promptBuilder.append(entry.getSrcText()).append("\t").append(locTerm).append("\n");
+            }
+        }
+
+        String systemPrompt = promptBuilder.toString();
 
         //判断翻译缓存里有没有
         // U+2026 HORIZONTAL ELLIPSIS 水平省略号 …
@@ -172,7 +211,7 @@ public class OpenaiTranslate extends BaseCachedTranslate {
                     .put("messages", Arrays.asList(
                         MapUtil.<String, String>builder()
                             .put("role", "system")
-                            .put("content", prompt)
+                            .put("content", systemPrompt)
                             .build(), // system prompt
                         MapUtil.<String, String>builder()
                             .put("role", "user")
@@ -221,7 +260,7 @@ public class OpenaiTranslate extends BaseCachedTranslate {
             Map<String, Object> bodyMap = MapUtil.<String, Object>builder()
                     .put("model", model)
                     .put("max_tokens", 4096)
-                    .put("system", prompt)
+                    .put("system", systemPrompt)
                     .put("messages", Arrays.asList(
                         MapUtil.<String, String>builder()
                             .put("role", "user")
